@@ -7,8 +7,16 @@ Microservice fuer Inbox-Nachrichten auf Basis von Java 21, Spring Boot 4.x und M
 Voraussetzungen:
 - Java 21
 - Maven Wrapper (`mvnw`)
-- Laufende MariaDB auf `localhost:3306`
-- Datenbank `inbox`
+- Laufende MariaDB
+
+Benutzte Environment-Variablen:
+- `INBOX_DB_HOST` (Default: `localhost`)
+- `INBOX_DB_PORT` (Default: `3306`)
+- `INBOX_DB_NAME` (Default: `inbox`)
+- `INBOX_DB_USER` (Default: `root`)
+- `INBOX_DB_PASSWORD` (Default: leer)
+- `INBOXPORT` (Default: `8082`)
+- `INBOX_INTERNAL_TOKEN` (Optional, Default: `change-me`)
 
 Start:
 ```bash
@@ -28,6 +36,17 @@ Swagger UI:
 
 ## Mit Docker starten
 
+Beispiel-ENV fuer Docker Compose:
+```bash
+INBOX_DB_HOST=mariadb
+INBOX_DB_PORT=3306
+INBOX_DB_NAME=inbox
+INBOX_DB_USER=root
+INBOX_DB_PASSWORD=
+INBOXPORT=8082
+INBOX_INTERNAL_TOKEN=change-me
+```
+
 Build und Start aller Services (MariaDB + inbox-service):
 ```bash
 docker compose up --build
@@ -46,11 +65,19 @@ Datenbankdaten entfernen:
 docker compose down -v
 ```
 
+## IntelliJ Run Configuration
+
+Beispiel fuer Environment Variables:
+
+`INBOX_DB_HOST=localhost;INBOX_DB_PORT=3306;INBOX_DB_NAME=inbox;INBOX_DB_USER=root;INBOX_DB_PASSWORD=;INBOXPORT=8082;INBOX_INTERNAL_TOKEN=change-me`
+
+Hinweis: `Include system environment variables` kann aktiviert bleiben, da die Variablen service-spezifisch sind.
+
 ## Hinweise zur DB-Konfiguration (nur Development)
 
 Die lokale Default-Konfiguration in `src/main/resources/application.properties` nutzt:
-- URL: `jdbc:mariadb://localhost:3306/inbox`
-- User: `root`
-- Passwort: leer
+- URL: `jdbc:mariadb://${INBOX_DB_HOST:localhost}:${INBOX_DB_PORT:3306}/${INBOX_DB_NAME:inbox}`
+- User: `${INBOX_DB_USER:root}`
+- Passwort: `${INBOX_DB_PASSWORD:}`
 
 Diese Konfiguration ist ausschliesslich fuer lokale Entwicklung gedacht und nicht fuer Produktion geeignet.
