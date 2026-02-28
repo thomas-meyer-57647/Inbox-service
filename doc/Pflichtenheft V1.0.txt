@@ -1,0 +1,324 @@
+﻿Pflichtenheft – Inbox / IN_APP Service (inbox-service)
+Projekt:
+Messaging / In-App Inbox (Multi-Tenant)
+Service:
+inbox-service
+Version:
+01.02.26
+Stand:
+28.02.26
+Technologie:
+Java 21, Spring Boot, Maven, MariaDB/MySQL, Flyway, Docker, OpenAPI (springdoc)
+
+
+Inhaltsverzeichnis
+1. Zielsetzung	3
+2. Systemkontext / Abhängigkeiten	3
+2.1 Inbound (wer ruft inbox-service auf)	3
+2.2 Outbound (wen ruft inbox-service auf)	3
+3. IAM-Absicherung (AuthN/AuthZ) & Multi-Tenant Regeln	3
+3.1 Grundprinzip	3
+3.2 JWT Contract	4
+3.3 Tenant Header (Standardisierung)	4
+3.4 Autorisierung: Scopes / Rollen / IAM-Permissions	5
+3.4.1 Scope-Matrix	5
+3.4.2 Admin-Fälle (SOLL/MUSS je Endpoint)	5
+3.4.3 Optional: Online Permission Check gegen IAM	5
+3.5 Interne Zustellung (Service-to-Service)	6
+4. REST-API (Endpoints)	6
+4.1 User API (IAM geschützt)	6
+4.2 Internal API (IAM geschützt)	6
+4.3 Doku/Ops	7
+5. Funktionale Anforderungen (Use Cases)	7
+5.1 Zustellung (Internal Delivery)	7
+5.2 Listen	7
+5.3 Detailabruf	7
+5.4 Read/Unread	8
+5.5 Papierkorb (Soft-Delete & Restore)	8
+6. Datenmodelle (DTOs)	8
+6.1 InternalInboxDeliveryRequest (Beispiel)	8
+6.2 ErrorResponse (Standard)	8
+7. Persistenz / Datenbankmodell (Tenant-Isolation)	9
+7.1 Grundsatz	9
+7.2 Tabellen	9
+7.3 Indizes (MUSS)	9
+8. Fehlerbehandlung	10
+9. Nicht-funktionale Anforderungen	10
+10. Betrieb / Deployment / Konfiguration	10
+10.1 Port	10
+10.2 JWT Resource Server	10
+10.3 Datenbank (MUSS)	10
+11. Test- & Abnahmekriterien	11
+12. Backlog / Erweiterungen	11
+13. Glossar (kurz)	11
+
+1. Zielsetzung
+Der Inbox / IN_APP Service verwaltet In-App Nachrichten pro Tenant und Benutzer.
+Er stellt eine REST-API bereit, um Nachrichten zu:
+zustellen (service-to-service, z. B. durch messaging-service)
+listen (paginierte Inbox)
+im Detail zu laden
+als gelesen/ungelesen zu markieren
+in den Papierkorb zu verschieben (Soft-Delete) und wiederherzustellen
+Wichtig (verbindlich):
+Alle Funktionen sind durch IAM abgesichert (JWT-Bearer Token, Scopes/Rollen/Permissions).
+Der Service ist Multi-Tenant: Inbox-Nachrichten dürfen ausschließlich innerhalb eines Tenants existieren und abrufbar sein.
+
+2. Systemkontext / Abhängigkeiten
+2.1 Inbound (wer ruft inbox-service auf)
+Frontend/Portal (i. d. R. via API Gateway): nutzt User-Endpunkte
+messaging-service: nutzt internen Zustell-Endpunkt für IN_APP Zustellung
+2.2 Outbound (wen ruft inbox-service auf)
+IAM-Service (optional/erweiterbar): für Permission-Checks/Module-Status, wenn nicht vollständig über Scopes im JWT abgedeckt (siehe Abschnitt 3.4)
+Auth-Service: liefert JWKS (Public Key) zur Signaturprüfung von JWTs
+
+3. IAM-Absicherung (AuthN/AuthZ) & Multi-Tenant Regeln
+3.1 Grundprinzip
+Der inbox-service ist ein OAuth2 Resource Server und akzeptiert ausschließlich Requests mit:
+Authorization: Bearer <JWT>
+Die Signatur wird gegen das JWKS des auth-service validiert (RS256).
+Alle fachlichen Endpunkte sind IAM-geschützt – es gibt keine “offenen” Funktionen.
+
+3.2 JWT Contract
+Der Token muss mindestens folgende Claims enthalten:
+iss (Issuer)
+sub (Subject Id)
+aud (Audience) muss inbox-service enthalten
+exp (Expiration)
+iat (Issued At)
+jti (Token ID)
+tenant_id (Tenant)
+subject_type ∈ {USER, SERVICE}
+scp (Scopes) als Liste (z. B. ["inbox.read","inbox.write"])
+Optional:
+sid (Session-ID)
+amr (Auth Methods)
+Tenant Consistency:
+Der Tenant im Token (tenant_id) ist Source of Truth.
+Wenn zusätzlich ein Tenant über Header/Query geliefert wird, muss er identisch zum Token sein, sonst 403 tenant mismatch.
+3.3 Tenant Header (Standardisierung)
+Zur Vereinheitlichung mit IAM wird tenantweit der Header genutzt:
+X-Tenant-Id
+Regel:
+X-Tenant-Id ist optional, aber wenn gesetzt, muss er dem Token-Claim tenant_id entsprechen.
+Der inbox-service darf Tenant-Daten niemals aus einem manipulierten Header übernehmen, ohne Token-Match.
+Hinweis zur Legacy-Compat (IST-Stand Code): aktuell existiert X-Company-Id.
+SOLL-Zielzustand: X-Company-Id wird als Alias akzeptiert, muss aber ebenfalls dem Token-tenant_id entsprechen. Langfristig wird X-Company-Id entfernt.
+
+3.4 Autorisierung: Scopes / Rollen / IAM-Permissions
+Die Endpunkte werden über Scopes (scp) abgesichert. Zusätzlich können Rollen/Persisted Permissions aus IAM optional ergänzt werden.
+3.4.1 Scope-Matrix
+inbox.read
+GET /api/v1/inbox/messages
+GET /api/v1/inbox/messages/{id}
+inbox.write
+POST /api/v1/inbox/messages/{id}/read
+POST /api/v1/inbox/messages/{id}/unread
+DELETE /api/v1/inbox/messages/{id}
+POST /api/v1/inbox/messages/{id}/restore
+inbox.deliver (Service Scope)
+POST /api/v1/internal/inbox/messages
+3.4.2 Admin-Fälle (SOLL/MUSS je Endpoint)
+Für Admin-Sonderrechte innerhalb eines Tenants können zusätzlich anerkannt werden:
+ROLE_TENANT_ADMIN / ROLE_SYSTEM_ADMIN oder
+IAM-Permission Codes (z. B. INBOX_ADMIN) als Rollen/Authorities gemappt
+Owner-Regel
+USER darf nur Messages sehen/ändern, die recipientUserId == token.sub haben.
+ADMIN darf innerhalb des Tenants auch fremde Messages sehen/ändern (nur wenn Admin-Authority vorliegt).
+3.4.3 Optional: Online Permission Check gegen IAM
+Wenn Scopes nicht granular genug sind oder Tenant-Module (enabled/disabled) dynamisch geprüft werden sollen:
+inbox-service kann (gecached) den IAM Endpoint abfragen:
+GET /v1/access/subjects/{subjectId}/modules/{moduleKey}
+Modulschlüssel (Empfehlung): inbox
+Permission Codes (Empfehlung): INBOX_READ, INBOX_WRITE, INBOX_DELIVER, INBOX_ADMIN
+MVP-Empfehlung: Scopes im JWT reichen, IAM-Online-Check nur bei Bedarf.
+
+3.5 Interne Zustellung (Service-to-Service)
+Der interne Zustell-Endpunkt wird nicht mehr primär über X-Internal-Token abgesichert, sondern über IAM:
+Authorization: Bearer <SERVICE TOKEN>
+subject_type = SERVICE
+scp enthält mindestens inbox.deliver
+aud enthält inbox-service
+tenant_id entspricht dem Tenant der zugestellten Nachrichten
+Deprecated (SOLL):
+X-Internal-Token gilt als Legacy und wird mittelfristig entfernt.
+
+4. REST-API (Endpoints)
+Base Path: /api/v1
+Service Port (MUSS): 8105
+Beispiel: http://localhost:8105/api/v1
+4.1 User API (IAM geschützt)
+GET /inbox/messages
+Scopes: inbox.read
+GET /inbox/messages/{id}
+Scopes: inbox.read
+POST /inbox/messages/{id}/read
+Scopes: inbox.write
+POST /inbox/messages/{id}/unread
+Scopes: inbox.write
+DELETE /inbox/messages/{id} (Soft-Delete)
+Scopes: inbox.write
+POST /inbox/messages/{id}/restore
+Scopes: inbox.write
+4.2 Internal API (IAM geschützt)
+POST /internal/inbox/messages
+Scopes: inbox.deliver (Service Token)
+
+4.3 Doku/Ops
+OpenAPI JSON: GET /api/v1/v3/api-docs
+Swagger UI: GET /api/v1/swagger-ui
+Actuator: GET /api/v1/actuator/health, GET /api/v1/actuator/info
+
+5. Funktionale Anforderungen (Use Cases)
+5.1 Zustellung (Internal Delivery)
+Input: Batch-Request (1..n Messages)
+Output: createdCount + messageIds
+Regeln:
+Jede Message wird als InboxMessage gespeichert mit:
+tenantId (aus Token tenant_id, MUSS mit Payload übereinstimmen)
+recipientUserId
+status = UNREAD
+Audit:
+createdBy/modifiedBy = Token sub (ServiceName) oder optionaler Actor
+Attachments werden als Referenzen gespeichert.
+5.2 Listen
+Query:
+unreadOnly (default false)
+category, severity optional
+from, to optional
+includeTrashed (default false)
+page (0..), size (1..200), sort (default createdAt,DESC)
+Multi-Tenant Regeln:
+Ergebnis ist immer auf tenant_id eingeschränkt.
+USER: zusätzlich auf recipientUserId == sub eingeschränkt.
+5.3 Detailabruf
+liefert Message inkl. Actions + Attachments
+Multi-Tenant Regeln wie 5.2
+5.4 Read/Unread
+Read: status=READ, readAt=now, readBy=sub
+Unread: status=UNREAD, readAt/readBy=null
+5.5 Papierkorb (Soft-Delete & Restore)
+Soft-Delete:
+trashedAt=now, trashedBy=sub
+Restore:
+trashedAt/trashedBy=null
+
+6. Datenmodelle (DTOs)
+6.1 InternalInboxDeliveryRequest (Beispiel)
+{
+  "tenantId": "TENANT_001",
+  "sourceService": "messaging-service",
+  "correlationId": "c-123",
+  "messages": [
+    {
+      "recipientUserId": "USER_123",
+      "title": "Ticket aktualisiert",
+      "body": "Dein Ticket #4711 wurde bearbeitet.",
+      "category": "TRANSACTIONAL",
+      "severity": "INFO",
+      "expiresAt": "2026-05-01T00:00:00Z",
+      "actions": [
+        { "label": "Ticket oeffnen", "url": "/tickets/4711", "actionType": "LINK" }
+      ],
+      "attachments": [
+        { "fileId": "FILE_123", "filename": "report.pdf", "mimeType": "application/pdf", "sizeBytes": 32768 }
+      ]
+    }
+  ]
+}
+Hinweis: Wenn im bestehenden Code companyId genutzt wird, gilt:
+companyId == tenantId (semantisch). In der finalen API wird tenantId bevorzugt.
+6.2 ErrorResponse (Standard)
+timestamp, status, errorCode, message, path, correlationId, details[]
+Zusätzliche IAM/Multitenant ErrorCodes (MUSS):
+UNAUTHORIZED / TOKEN_INVALID
+TENANT_MISMATCH
+ACCESS_DENIED
+7. Persistenz / Datenbankmodell (Tenant-Isolation)
+7.1 Grundsatz
+Jeder Datensatz enthält tenant_id (oder bestehend: company_id) und ist nur innerhalb dieses Tenants sichtbar.
+Alle Queries müssen tenant-scharf sein:
+WHERE tenant_id = :tenantId AND ...
+7.2 Tabellen
+inbox_message
+id (UUID)
+tenant_id (oder company_id)
+recipient_user_id
+title, body
+category, severity
+status (UNREAD|READ)
+expires_at (optional)
+read_at, read_by (optional)
+actions_json (optional)
+Audit: created_at/by, modified_at/by, trashed_at/by
+version (Optimistic Lock)
+inbox_attachment_ref
+id
+tenant_id
+message_id
+file_id, filename, mime_type, size_bytes
+created_at
+7.3 Indizes (MUSS)
+(tenant_id, recipient_user_id, created_at)
+(tenant_id, recipient_user_id, status, created_at)
+(tenant_id, recipient_user_id, trashed_at)
+Attachments: (tenant_id, message_id)
+
+8. Fehlerbehandlung
+HTTP-Codes:
+200 OK (GET/POST)
+204 No Content (DELETE)
+400 Validation
+401 Unauthorized (Token fehlt/ungültig/Contract verletzt)
+403 Forbidden (Tenant mismatch / fehlende Rechte)
+404 Not Found (message nicht vorhanden im Tenant)
+409 Conflict (Optimistic Lock)
+500 Unexpected
+
+9. Nicht-funktionale Anforderungen
+Security: IAM/JWT zwingend, Tenant Isolation zwingend
+Performance: Paging, tenant-scharfe Indizes
+Audit: alle Mutationen schreiben modifiedAt/By, Deletes trashedAt/By
+Observability: CorrelationId Logging, Actuator Health/Info
+
+10. Betrieb / Deployment / Konfiguration
+10.1 Port
+Der Service läuft auf 8105.
+server.port=${INBOXPORT:8105}
+server.servlet.context-path=/api/v1
+10.2 JWT Resource Server
+Konfiguration (Beispiel, Zielzustand):
+spring.security.oauth2.resourceserver.jwt.jwk-set-uri=${AUTH_JWKS_URI:http://auth-service:8080/api/v1/auth/.well-known/jwks.json}
+spring.security.oauth2.resourceserver.jwt.issuer-uri=${AUTH_ISSUER:http://auth-service:8080/api/v1/auth}
+Der auth-service stellt das JWKS unter /.well-known/jwks.json bereit.
+10.3 Datenbank
+INBOX_DB_HOST, INBOX_DB_PORT, INBOX_DB_NAME, INBOX_DB_USER, INBOX_DB_PASSWORD
+11. Test- & Abnahmekriterien
+IAM / Security
+Request ohne Bearer Token → 401
+Token ohne tenant_id / falsches aud / fehlende Pflichtclaims → 401
+X-Tenant-Id gesetzt, aber != tenant_id → 403 (TENANT_MISMATCH)
+User ohne inbox.read kann nicht listen → 403
+User ohne inbox.write kann nicht read/delete/restore → 403
+Internal delivery nur mit subject_type=SERVICE + inbox.deliver → 403/401 sonst
+Multi-Tenant
+Message aus Tenant A darf in Tenant B niemals auffindbar sein (auch bei gleicher messageId) → 404/403
+Alle DB Queries sind tenant-scharf (Index-Nutzung nachweisbar)
+Funktional
+Delivery erstellt UNREAD inkl. Audit
+Listen/Detail/Read/Unread/Trash/Restore funktionieren gemäß Spezifikation
+Service läuft standardmäßig auf Port 8105
+
+12. Backlog / Erweiterungen
+Retention/Purge Job für expiresAt und „Trash älter als X Tage“
+Outbox Events (InboxMessageCreated/Read/Deleted/Restored)
+Idempotency-Key für interne Zustellung
+Admin Company/Tenant Inbox Views (aggregiert)
+
+13. Glossar (kurz)
+Tenant: Mandant/Kunde – Daten sind strikt getrennt.
+IAM: Identity & Access Management – regelt AuthN/AuthZ.
+JWT: signierter Token mit Claims (tenant_id, scp, …).
+Scope: Berechtigung im Token (z. B. inbox.read).
+Soft-Delete: Papierkorb statt echter Löschung.
+

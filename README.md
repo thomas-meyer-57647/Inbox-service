@@ -15,7 +15,7 @@ Benutzte Environment-Variablen:
 - `INBOX_DB_NAME` (Default: `inbox`)
 - `INBOX_DB_USER` (Default: `root`)
 - `INBOX_DB_PASSWORD` (Default: leer)
-- `INBOXPORT` (Default: `8082`)
+- `INBOXPORT` (Default: `8105`)
 - `INBOX_INTERNAL_TOKEN` (Optional, Default: `change-me`)
 
 Start:
@@ -29,10 +29,10 @@ Unter Windows (PowerShell):
 ```
 
 Die API laeuft standardmaessig auf:
-- `http://localhost:8082/api/v1`
+- `http://localhost:8105/api/v1`
 
 Swagger UI:
-- `http://localhost:8082/api/v1/swagger-ui`
+- `http://localhost:8105/api/v1/swagger-ui`
 
 ## Mit Docker starten
 
@@ -43,7 +43,7 @@ INBOX_DB_PORT=3306
 INBOX_DB_NAME=inbox
 INBOX_DB_USER=root
 INBOX_DB_PASSWORD=
-INBOXPORT=8082
+INBOXPORT=8105
 INBOX_INTERNAL_TOKEN=change-me
 ```
 
@@ -53,7 +53,10 @@ docker compose up --build
 ```
 
 Swagger UI:
-- `http://localhost:8082/api/v1/swagger-ui`
+- `http://localhost:8105/api/v1/swagger-ui`
+
+Healthcheck:
+- `http://localhost:8105/api/v1/actuator/health`
 
 Stoppen:
 ```bash
@@ -69,7 +72,7 @@ docker compose down -v
 
 Beispiel fuer Environment Variables:
 
-`INBOX_DB_HOST=localhost;INBOX_DB_PORT=3306;INBOX_DB_NAME=inbox;INBOX_DB_USER=root;INBOX_DB_PASSWORD=;INBOXPORT=8082;INBOX_INTERNAL_TOKEN=change-me`
+`INBOX_DB_HOST=localhost;INBOX_DB_PORT=3306;INBOX_DB_NAME=inbox;INBOX_DB_USER=root;INBOX_DB_PASSWORD=;INBOXPORT=8105;INBOX_INTERNAL_TOKEN=change-me`
 
 Hinweis: `Include system environment variables` kann aktiviert bleiben, da die Variablen service-spezifisch sind.
 

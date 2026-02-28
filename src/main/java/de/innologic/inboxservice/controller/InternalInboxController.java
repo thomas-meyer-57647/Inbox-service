@@ -13,6 +13,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.parameters.RequestBody;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,18 +26,22 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/internal/inbox/messages")
 @Tag(name = "Internal Inbox Delivery", description = "Interne Endpoint-Gruppe fuer Zustellung durch messaging-service")
+@SecurityRequirement(name = "bearerAuth")
 public class InternalInboxController {
 
     private final InternalInboxDeliveryService inboxService;
     private final AuthContextResolver authContextResolver;
     private final String expectedInternalToken;
+    private final boolean legacyInternalTokenEnabled;
 
     public InternalInboxController(InternalInboxDeliveryService inboxService,
                                    AuthContextResolver authContextResolver,
-                                   @Value("${inbox.security.internal-token}") String expectedInternalToken) {
+                                   @Value("${inbox.security.internal-token}") String expectedInternalToken,
+                                   @Value("${inbox.security.legacy-internal-token-enabled:false}") boolean legacyInternalTokenEnabled) {
         this.inboxService = inboxService;
         this.authContextResolver = authContextResolver;
         this.expectedInternalToken = expectedInternalToken;
+        this.legacyInternalTokenEnabled = legacyInternalTokenEnabled;
     }
 
     @Operation(
@@ -62,6 +67,10 @@ public class InternalInboxController {
                 summary = "Pflichtfeld fehlt",
                 value = "{\"timestamp\":\"2026-02-14T12:00:00Z\",\"status\":400,\"errorCode\":\"INVALID_REQUEST\",\"message\":\"sourceService is required\",\"path\":\"/api/v1/internal/inbox/messages\",\"correlationId\":\"c-123\",\"details\":[\"sourceService is required\"]}"
             )
+        )),
+        @ApiResponse(responseCode = "401", description = "Missing or invalid bearer token", content = @Content(
+            mediaType = MediaType.APPLICATION_JSON_VALUE,
+            schema = @Schema(implementation = ErrorResponse.class)
         )),
         @ApiResponse(responseCode = "403", description = "Interner Zugriff verweigert", content = @Content(
             mediaType = MediaType.APPLICATION_JSON_VALUE,
@@ -94,7 +103,7 @@ public class InternalInboxController {
     @PostMapping
     public InternalCreateInboxMessagesResponseDto deliver(
         @Parameter(description = "Interner Service-Token", required = true, example = "change-me")
-        @RequestHeader("X-Internal-Token") String internalToken,
+        @RequestHeader(value = "X-Internal-Token", required = false) String internalToken,
         @Parameter(description = "Actor SubjectId fuer Audit. Wenn nicht gesetzt, wird sourceService verwendet.", required = false, example = "messaging-service")
         @RequestHeader(value = "X-Subject-Id", required = false) String subjectId,
         @RequestBody(
@@ -112,7 +121,9 @@ public class InternalInboxController {
         )
         @Valid @org.springframework.web.bind.annotation.RequestBody InternalInboxDeliveryRequest request
     ) {
-        authContextResolver.assertInternalToken(internalToken, expectedInternalToken);
+        if (legacyInternalTokenEnabled && internalToken != null && !internalToken.isBlank()) {
+            authContextResolver.assertInternalToken(internalToken, expectedInternalToken);
+        }
         return inboxService.deliver(request, subjectId);
     }
 }

@@ -14,8 +14,12 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.util.UUID;
 
@@ -24,6 +28,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -67,7 +72,7 @@ class InboxControllerIntegrationTest {
 
     @Test
     void internalDeliveryCreatesMessagesSuccessfully_batch() throws Exception {
-        mockMvc.perform(post("/internal/inbox/messages")
+        performDeliver(post("/internal/inbox/messages")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Internal-Token", INTERNAL_TOKEN)
                 .content(internalDeliveryPayload(2)))
@@ -82,7 +87,7 @@ class InboxControllerIntegrationTest {
     void userListReturnsPagingCorrectly() throws Exception {
         deliverBatch(3);
 
-        mockMvc.perform(get("/inbox/messages")
+        performRead(get("/inbox/messages")
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID)
                 .param("page", "0")
@@ -95,10 +100,37 @@ class InboxControllerIntegrationTest {
     }
 
     @Test
+    void adminListReturnsTenantWideMessages() throws Exception {
+        deliverSingleAndGetMessageId();
+        deliverSingleMessageFor(OTHER_USER_ID);
+
+        mockMvc.perform(get("/inbox/messages")
+                .header("X-Company-Id", COMPANY_ID)
+                .header("X-Subject-Id", USER_ID)
+                .header("X-Role", "ADMIN")
+                .with(jwtWithScope("SCOPE_inbox.read", COMPANY_ID, USER_ID)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.total").value(2))
+            .andExpect(jsonPath("$.items.length()").value(2));
+    }
+
+    @Test
+    void nonAdminListRemainsSubjectScoped() throws Exception {
+        deliverSingleAndGetMessageId();
+        deliverSingleMessageFor(OTHER_USER_ID);
+
+        performRead(get("/inbox/messages")
+                .header("X-Company-Id", COMPANY_ID)
+                .header("X-Subject-Id", USER_ID))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.total").value(1));
+    }
+
+    @Test
     void detailReturnsMessage() throws Exception {
         String messageId = deliverSingleAndGetMessageId();
 
-        mockMvc.perform(get("/inbox/messages/{id}", messageId)
+        performRead(get("/inbox/messages/{id}", messageId)
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isOk())
@@ -113,7 +145,7 @@ class InboxControllerIntegrationTest {
     void markReadAndUnreadChangesStatusCorrectly() throws Exception {
         String messageId = deliverSingleAndGetMessageId();
 
-        mockMvc.perform(post("/inbox/messages/{id}/read", messageId)
+        performWrite(post("/inbox/messages/{id}/read", messageId)
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isOk())
@@ -121,7 +153,7 @@ class InboxControllerIntegrationTest {
             .andExpect(jsonPath("$.readAt").isNotEmpty())
             .andExpect(jsonPath("$.readBy").value(USER_ID));
 
-        mockMvc.perform(post("/inbox/messages/{id}/unread", messageId)
+        performWrite(post("/inbox/messages/{id}/unread", messageId)
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isOk())
@@ -134,7 +166,7 @@ class InboxControllerIntegrationTest {
     void softDeleteSetsTrashedAtAndMessageDisappearsFromDefaultList() throws Exception {
         String messageId = deliverSingleAndGetMessageId();
 
-        mockMvc.perform(delete("/inbox/messages/{id}", messageId)
+        performWrite(delete("/inbox/messages/{id}", messageId)
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isNoContent());
@@ -143,7 +175,7 @@ class InboxControllerIntegrationTest {
         assertThat(entity.getTrashedAt()).isNotNull();
         assertThat(entity.getTrashedBy()).isEqualTo(USER_ID);
 
-        mockMvc.perform(get("/inbox/messages")
+        performRead(get("/inbox/messages")
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isOk())
@@ -160,7 +192,7 @@ class InboxControllerIntegrationTest {
             }
             """;
 
-        mockMvc.perform(post("/internal/inbox/messages")
+        performDeliver(post("/internal/inbox/messages")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Internal-Token", INTERNAL_TOKEN)
                 .content(invalidPayload))
@@ -174,22 +206,24 @@ class InboxControllerIntegrationTest {
     void accessDeniedForWrongCompanyOrWrongSubjectWithoutAdmin() throws Exception {
         String messageId = deliverSingleAndGetMessageId();
 
-        mockMvc.perform(get("/inbox/messages/{id}", messageId)
+        performRead(get("/inbox/messages/{id}", messageId)
                 .header("X-Company-Id", "01JOTHERCOMPANY")
-                .header("X-Subject-Id", USER_ID))
+                .header("X-Subject-Id", USER_ID),
+            "01JOTHERCOMPANY", USER_ID)
             .andExpect(status().isForbidden())
-            .andExpect(jsonPath("$.errorCode").value("ACCESS_DENIED"));
+            .andExpect(jsonPath("$.errorCode").value("TENANT_MISMATCH"));
 
-        mockMvc.perform(get("/inbox/messages/{id}", messageId)
+        performRead(get("/inbox/messages/{id}", messageId)
                 .header("X-Company-Id", COMPANY_ID)
-                .header("X-Subject-Id", OTHER_USER_ID))
+                .header("X-Subject-Id", OTHER_USER_ID),
+            COMPANY_ID, OTHER_USER_ID)
             .andExpect(status().isForbidden())
             .andExpect(jsonPath("$.errorCode").value("ACCESS_DENIED"));
     }
 
     @Test
     void unknownMessageIdReturns404() throws Exception {
-        mockMvc.perform(get("/inbox/messages/{id}", UUID.randomUUID())
+        performRead(get("/inbox/messages/{id}", UUID.randomUUID())
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isNotFound())
@@ -203,7 +237,7 @@ class InboxControllerIntegrationTest {
             .when(inboxService)
             .markRead(any(), eq(messageId));
 
-        mockMvc.perform(post("/inbox/messages/{id}/read", messageId)
+        performWrite(post("/inbox/messages/{id}/read", messageId)
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isConflict())
@@ -214,12 +248,12 @@ class InboxControllerIntegrationTest {
     void includeTrashedFalseDoesNotReturnDeletedMessages() throws Exception {
         String messageId = deliverSingleAndGetMessageId();
 
-        mockMvc.perform(delete("/inbox/messages/{id}", messageId)
+        performWrite(delete("/inbox/messages/{id}", messageId)
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID))
             .andExpect(status().isNoContent());
 
-        mockMvc.perform(get("/inbox/messages")
+        performRead(get("/inbox/messages")
                 .header("X-Company-Id", COMPANY_ID)
                 .header("X-Subject-Id", USER_ID)
                 .param("includeTrashed", "false"))
@@ -228,7 +262,7 @@ class InboxControllerIntegrationTest {
     }
 
     private void deliverBatch(int count) throws Exception {
-        mockMvc.perform(post("/internal/inbox/messages")
+        performDeliver(post("/internal/inbox/messages")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Internal-Token", INTERNAL_TOKEN)
                 .content(internalDeliveryPayload(count)))
@@ -236,7 +270,7 @@ class InboxControllerIntegrationTest {
     }
 
     private String deliverSingleAndGetMessageId() throws Exception {
-        String response = mockMvc.perform(post("/internal/inbox/messages")
+        String response = performDeliver(post("/internal/inbox/messages")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("X-Internal-Token", INTERNAL_TOKEN)
                 .content(internalDeliveryPayload(1)))
@@ -275,5 +309,64 @@ class InboxControllerIntegrationTest {
               "messages":[%s]
             }
             """.formatted(messages);
+    }
+
+    private ResultActions performRead(MockHttpServletRequestBuilder builder) throws Exception {
+        return mockMvc.perform(builder.with(jwtWithScope("SCOPE_inbox.read", COMPANY_ID, USER_ID)));
+    }
+
+    private ResultActions performRead(MockHttpServletRequestBuilder builder, String tenantId, String subject) throws Exception {
+        return mockMvc.perform(builder.with(jwtWithScope("SCOPE_inbox.read", tenantId, subject)));
+    }
+
+    private ResultActions performWrite(MockHttpServletRequestBuilder builder) throws Exception {
+        return mockMvc.perform(builder.with(jwtWithScope("SCOPE_inbox.write", COMPANY_ID, USER_ID)));
+    }
+
+    private ResultActions performDeliver(MockHttpServletRequestBuilder builder) throws Exception {
+        return mockMvc.perform(builder.with(jwtWithScope("SCOPE_inbox.deliver", COMPANY_ID, "messaging-service")));
+    }
+
+    private void deliverSingleMessageFor(String recipientUserId) throws Exception {
+        mockMvc.perform(post("/internal/inbox/messages")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(internalDeliveryPayloadForRecipient(recipientUserId))
+                .with(jwtWithScope("SCOPE_inbox.deliver", COMPANY_ID, "messaging-service")))
+            .andExpect(status().isOk());
+    }
+
+    private String internalDeliveryPayloadForRecipient(String recipientUserId) {
+        return """
+            {
+              "companyId":"01JCOMPANY123",
+              "sourceService":"messaging-service",
+              "correlationId":"c-123",
+              "messages":[
+                {
+                  "recipientUserId":"%s",
+                  "title":"Ticket aktualisiert",
+                  "body":"Dein Ticket wurde bearbeitet.",
+                  "category":"TRANSACTIONAL",
+                  "severity":"INFO",
+                  "expiresAt":"2026-05-01T00:00:00Z",
+                  "actions":[{"label":"Ticket oeffnen","url":"/tickets/4711","actionType":"LINK"}],
+                  "attachments":[{"fileId":"01JFILE123","filename":"report.pdf","mimeType":"application/pdf","sizeBytes":32768}]
+                }
+              ]
+            }
+            """.formatted(recipientUserId);
+    }
+
+    private RequestPostProcessor jwtWithScope(String scope, String tenantId, String subject) {
+        return jwt()
+            .authorities(new SimpleGrantedAuthority(scope))
+            .jwt(builder -> {
+                if (tenantId != null) {
+                    builder.claim("tenant_id", tenantId);
+                }
+                if (subject != null) {
+                    builder.subject(subject);
+                }
+            });
     }
 }

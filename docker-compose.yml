@@ -31,10 +31,10 @@ services:
       INBOX_DB_NAME: ${INBOX_DB_NAME:-inbox}
       INBOX_DB_USER: ${INBOX_DB_USER:-root}
       INBOX_DB_PASSWORD: ${INBOX_DB_PASSWORD:-}
-      INBOXPORT: ${INBOXPORT:-8082}
+      INBOXPORT: ${INBOXPORT:-8105}
       INBOX_INTERNAL_TOKEN: ${INBOX_INTERNAL_TOKEN:-change-me}
     ports:
-      - "${INBOXPORT:-8082}:${INBOXPORT:-8082}"
+      - "${INBOXPORT:-8105}:${INBOXPORT:-8105}"
 
 volumes:
   mariadb_data:

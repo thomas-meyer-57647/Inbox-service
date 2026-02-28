@@ -13,6 +13,7 @@ import de.innologic.inboxservice.entity.InboxMessageStatus;
 import de.innologic.inboxservice.exception.AccessDeniedException;
 import de.innologic.inboxservice.exception.InboxMessageNotFoundException;
 import de.innologic.inboxservice.exception.ValidationException;
+import de.innologic.inboxservice.exception.TenantMismatchException;
 import de.innologic.inboxservice.repository.InboxAttachmentRefRepository;
 import de.innologic.inboxservice.repository.InboxMessageRepository;
 import org.springframework.data.domain.Page;
@@ -112,8 +113,10 @@ public class InboxService implements InternalInboxDeliveryService, UserInboxMess
         Sort sortSpec = parseSort(sort);
         PageRequest pageRequest = PageRequest.of(page, size, sortSpec);
 
-        Specification<InboxMessageEntity> spec = Specification.where(byCompany(authContext.companyId()))
-            .and(byRecipient(authContext.subjectId()));
+        Specification<InboxMessageEntity> spec = Specification.where(byCompany(authContext.companyId()));
+        if (!authContext.admin()) {
+            spec = spec.and(byRecipient(authContext.subjectId()));
+        }
         if (unreadOnly) {
             spec = spec.and(byStatus(InboxMessageStatus.UNREAD));
         }
@@ -205,6 +208,9 @@ public class InboxService implements InternalInboxDeliveryService, UserInboxMess
             .orElseThrow(() -> new InboxMessageNotFoundException("Inbox message was not found"));
 
         if (!entity.getCompanyId().equals(authContext.companyId())) {
+            if (authContext.jwtAuthenticated()) {
+                throw new TenantMismatchException("Tenant mismatch");
+            }
             throw new AccessDeniedException("Cross-company access denied");
         }
         if (!authContext.admin() && !entity.getRecipientUserId().equals(authContext.subjectId())) {

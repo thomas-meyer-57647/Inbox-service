@@ -16,5 +16,6 @@ WORKDIR /app
 
 COPY --from=build /workspace/target/*.jar /app/app.jar
 
-EXPOSE 8082
+ENV INBOXPORT=8105
+EXPOSE 8105
 ENTRYPOINT ["java","-jar","/app/app.jar"]
